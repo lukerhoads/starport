@@ -13,6 +13,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
+	chaincfg "github.com/tendermint/starport/starport/chainconfig"
 	"github.com/tendermint/starport/starport/internal/version"
 	"github.com/tendermint/starport/starport/pkg/clispinner"
 	"github.com/tendermint/starport/starport/pkg/cosmosaccount"
@@ -20,8 +21,10 @@ import (
 	"github.com/tendermint/starport/starport/pkg/events"
 	"github.com/tendermint/starport/starport/pkg/gitpod"
 	"github.com/tendermint/starport/starport/pkg/goenv"
+	"github.com/tendermint/starport/starport/pkg/gomodulepath"
 	"github.com/tendermint/starport/starport/pkg/xgenny"
 	"github.com/tendermint/starport/starport/services/chain"
+	"github.com/tendermint/starport/starport/services/pluginsrpc"
 	"github.com/tendermint/starport/starport/services/scaffolder"
 )
 
@@ -55,6 +58,72 @@ starport scaffold chain github.com/cosmonaut/mars`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			cfg, chainId, cErr := getDefaultConfig(cmd)
+			// ErrCouldntLocateConfig means it is a build run
+			if cErr != nil && cErr != chaincfg.ErrCouldntLocateConfig {
+				panic(cErr)
+			}
+
+			if strings.Contains(cmd.CommandPath(), "starport plugin") {
+				return goenv.ConfigurePath()
+			}
+
+			// If arg length is zero, inject hooks and that is it.
+			if cErr != chaincfg.ErrCouldntLocateConfig && len(args) == 0 {
+				pluginManager, err := pluginsrpc.NewManager(chainId, cfg)
+				if err != nil {
+					panic(err)
+				}
+
+				if err := pluginManager.RetrieveCached(ctx); err != nil {
+					panic(err)
+				}
+
+				if err := pluginManager.InjectHooks(ctx, cmd); err != nil {
+					panic(err)
+				}
+
+				err = pluginManager.Cache(ctx)
+				if err != nil {
+					panic(err)
+				}
+
+				return goenv.ConfigurePath()
+			}
+
+			// If arg length is greater than one, we will most likely need a command, and
+			// we might need a hook.
+			if cErr != chaincfg.ErrCouldntLocateConfig && len(cfg.Plugins) > 0 {
+				// Initiate plugin manager with config, call the method to retain configuration?
+				pluginManager, err := pluginsrpc.NewManager(chainId, cfg)
+				if err != nil {
+					panic(err)
+				}
+
+				if err := pluginManager.RetrieveCached(ctx); err != nil {
+					panic(err)
+				}
+
+				if cancel, err := pluginManager.InjectPlugins(ctx, cmd, args); err != nil {
+					panic(err)
+				} else if cancel {
+					// Check for completion of injected plugins, if so, return
+					cmd.PreRunE = func(cmd *cobra.Command, args []string) error { return nil }
+					cmd.RunE = func(cmd *cobra.Command, args []string) error { return nil }
+					err = pluginManager.Cache(ctx)
+					if err != nil {
+						panic(err)
+					}
+
+					return nil
+				}
+
+				err = pluginManager.Cache(ctx)
+				if err != nil {
+					panic(err)
+				}
+			}
+
 			return goenv.ConfigurePath()
 		},
 	}
@@ -68,6 +137,7 @@ starport scaffold chain github.com/cosmonaut/mars`,
 	c.AddCommand(NewTools())
 	c.AddCommand(NewDocs())
 	c.AddCommand(NewVersion())
+	c.AddCommand(NewPlugin())
 	c.AddCommand(deprecated()...)
 
 	return c
@@ -276,6 +346,30 @@ https://docs.starport.network/migration`, sc.Version.String(),
 		)
 	}
 	return sc, nil
+}
+
+func getDefaultConfig(cmd *cobra.Command) (chaincfg.Config, string, error) {
+	// need new way of getting path of chain
+	appPath := flagGetPath(cmd)
+	absPath, err := filepath.Abs(appPath)
+	if err != nil {
+		return chaincfg.Config{}, "", err
+	}
+
+	p, gappPath, err := gomodulepath.Find(absPath)
+	if err != nil {
+		return chaincfg.Config{}, "", err
+	}
+
+	chainId := p.Root
+
+	configPath, err := chaincfg.LocateDefault(gappPath)
+	if err != nil {
+		return chaincfg.Config{}, "", err
+	}
+
+	res, err := chaincfg.ParseFile(configPath)
+	return res, chainId, err
 }
 
 func printSection(title string) {

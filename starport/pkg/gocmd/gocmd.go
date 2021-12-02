@@ -17,6 +17,9 @@ const (
 	// CommandInstall represents go "install" command.
 	CommandInstall = "install"
 
+	// CommandGet represents go "get" command
+	CommandGet = "get"
+
 	// CommandBuild represents go "build" command.
 	CommandBuild = "build"
 
